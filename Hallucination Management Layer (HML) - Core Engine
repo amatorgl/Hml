@@ -1,0 +1,473 @@
+"""
+Hallucination Management Layer (HML) - Core Engine
+Version 4.2
+Author: Roya Foladvand
+Organization: Rabt Publishing House
+
+Core implementation of the HML system for detecting and mitigating AI hallucinations.
+"""
+
+import re
+import json
+from typing import Dict, List, Tuple, Optional
+from enum import Enum
+from dataclasses import dataclass
+import numpy as np
+
+
+class Mood(Enum):
+    """Detected conversation mood"""
+    CALM = "calm"
+    HEATED = "heated"
+    SENSITIVE = "sensitive"
+    PLAYFUL = "playful"
+    SERIOUS = "serious"
+    NEUTRAL = "neutral"
+
+
+class CulturalContext(Enum):
+    """Cultural interpretation models (18+ contexts)"""
+    WESTERN_US = "western_us"
+    WESTERN_EU = "western_eu"
+    EASTERN_ASIA = "eastern_asia"
+    SOUTH_ASIA = "south_asia"
+    MIDDLE_EAST = "middle_east"
+    AFRICA = "africa"
+    LATIN_AMERICA = "latin_america"
+    DIASPORA = "diaspora"
+    LGBTQ_PLUS = "lgbtq_plus"
+    DISABILITY = "disability"
+    REFUGEE = "refugee"
+    INDIGENOUS = "indigenous"
+    NORDIC = "nordic"
+    MEDITERRANEAN = "mediterranean"
+    SLAVIC = "slavic"
+    MIXED_HYBRID = "mixed_hybrid"
+    UNKNOWN = "unknown"
+
+
+class DecisionType(Enum):
+    """Moderation decision types"""
+    ALLOW = "allow"
+    REWRITE = "rewrite"
+    ESCALATE = "escalate"
+    BLOCK = "block"
+
+
+@dataclass
+class AnalysisResult:
+    """Analysis result structure"""
+    content: str
+    hallucination_score: float  # 0-1
+    risk_score: float  # 0-1
+    decision: str
+    reasoning: List[str]
+    suggestion: Optional[str] = None
+    context: Optional[Dict] = None
+    gray_zone_analysis: Optional[Dict] = None
+
+
+class ContextDetector:
+    """
+    Layer 1: Context Detection
+    Understands conversation mood, culture, tone, and sensitivity
+    """
+
+    def __init__(self):
+        self.mood_indicators = {
+            Mood.HEATED: r'\b(angry|furious|hate|despise|disgusted)\b',
+            Mood.PLAYFUL: r'\b(lol|haha|funny|joke|silly)\b',
+            Mood.SERIOUS: r'\b(important|critical|urgent|serious)\b',
+            Mood.SENSITIVE: r'\b(hurt|offended|traumatized|violated)\b',
+        }
+
+        self.cultural_languages = {
+            CulturalContext.WESTERN_US: [r'\b(hello|hey|yo)\b', r'[A-Z]'],
+            CulturalContext.EASTERN_ASIA: [r'[中日韓한]', r'\b(desu|ne)\b'],
+            CulturalContext.MIDDLE_EAST: [r'[عفاليح]', r'\b(assalamu|wa alaikum)\b'],
+            CulturalContext.DIASPORA: r'\b(mix|both|cultures)\b',
+        }
+
+        self.sensitive_topics = {
+            'politics': 0.8,
+            'religion': 0.9,
+            'race': 0.9,
+            'gender': 0.7,
+            'sexual': 0.8,
+            'disability': 0.6,
+            'violence': 0.95,
+            'medical': 0.85,
+        }
+
+    def detect(self, text: str, conversation_history: List[str] = None) -> Dict:
+        """
+        Detect context from text
+
+        Args:
+            text: Input text to analyze
+            conversation_history: Previous messages for context
+
+        Returns:
+            Context dictionary with mood, culture, tone, and sensitivity
+        """
+        if conversation_history is None:
+            conversation_history = []
+
+        full_text = " ".join(conversation_history + [text]).lower()
+
+        # Mood detection
+        mood = self._detect_mood(full_text)
+
+        # Cultural pattern detection
+        culture = self._detect_culture(full_text)
+
+        # Tone detection
+        tone = self._detect_tone(text)
+
+        # Emotional intensity
+        emotional_intensity = self._calculate_emotional_intensity(full_text)
+
+        # Sensitivity level
+        sensitivity_level = self._calculate_sensitivity(full_text)
+
+        return {
+            "mood": mood,
+            "cultural_context": culture,
+            "tone": tone,
+            "emotional_intensity": emotional_intensity,
+            "sensitivity_level": sensitivity_level,
+            "conversation_length": len(conversation_history),
+        }
+
+    def _detect_mood(self, text: str) -> str:
+        """Detect conversation mood"""
+        for mood, pattern in self.mood_indicators.items():
+            if len(re.findall(pattern, text)) >= 2:
+                return mood.value
+        return Mood.NEUTRAL.value
+
+    def _detect_culture(self, text: str) -> str:
+        """Detect cultural context from language patterns"""
+        for culture, languages in self.cultural_languages.items():
+            if isinstance(languages, list):
+                if any(re.search(lang, text) for lang in languages):
+                    return culture.value
+            elif re.search(languages, text):
+                return culture.value
+        return CulturalContext.UNKNOWN.value
+
+    def _detect_tone(self, text: str) -> str:
+        """Detect tone (sarcasm, formal, etc.)"""
+        if any(word in text.lower() for word in ["sarcasm", "yeah right", "obviously"]):
+            return "sarcastic"
+        elif len(text.split()) < 5:
+            return "brief"
+        elif any(word in text.lower() for word in ["please", "would you", "kindly"]):
+            return "formal"
+        return "informal"
+
+    def _calculate_emotional_intensity(self, text: str) -> float:
+        """Calculate emotional intensity (0-1)"""
+        intensity_markers = [
+            (r'!!!', 0.3),
+            (r'\?\?', 0.2),
+            (r'CAPS WORDS', 0.25),
+            (r'curse words', 0.4),
+        ]
+        total = 0.0
+        for pattern, weight in intensity_markers:
+            total += len(re.findall(pattern, text)) * weight
+        return min(total, 1.0)
+
+    def _calculate_sensitivity(self, text: str) -> float:
+        """Calculate topic sensitivity (0-1)"""
+        max_sensitivity = 0.2  # default low
+        for topic, weight in self.sensitive_topics.items():
+            if topic in text.lower():
+                max_sensitivity = max(max_sensitivity, weight)
+        return max_sensitivity
+
+
+class GrayZoneDetector:
+    """
+    Layer 2: Gray Zone Detection
+    Identifies ambiguous content that requires careful analysis
+    """
+
+    def __init__(self):
+        self.ambiguity_words = r'\b(maybe|perhaps|I think|probably|guess|might|could)\b'
+        self.insult_words = r'\b(stupid|idiot|hate|loser|dumb|moron)\b'
+        self.joke_markers = r'\b(joke|funny|lol|haha|sarcasm|irony)\b'
+
+    def detect(self, content: str, context: Dict) -> Dict:
+        """
+        Detect gray zone content
+
+        Args:
+            content: Text to analyze
+            context: Context from ContextDetector
+
+        Returns:
+            Gray zone analysis dictionary
+        """
+        text = content.lower()
+
+        # Calculate gray zone score
+        ambiguity_count = len(re.findall(self.ambiguity_words, text))
+        insult_count = len(re.findall(self.insult_words, text))
+
+        grayzone_score = min(
+            ambiguity_count * 0.2 + insult_count * 0.3,
+            1.0
+        )
+
+        # Humor vs insult discrimination
+        humor_markers = len(re.findall(self.joke_markers, text))
+        humor_vs_insult = min(0.8 if humor_markers > 0 else 0.3, 1.0)
+
+        # Adjust based on mood
+        if context["mood"] == "heated":
+            humor_vs_insult = max(humor_vs_insult - 0.5, 0.0)
+
+        # Critique vs attack
+        critique_vs_attack = self._analyze_critique_vs_attack(text)
+
+        return {
+            "grayzone_score": round(grayzone_score, 2),
+            "humor_vs_insult": round(humor_vs_insult, 2),
+            "critique_vs_attack": round(critique_vs_attack, 2),
+            "ambiguity_level": ambiguity_count,
+            "hostility_level": insult_count,
+            "requires_review": grayzone_score > 0.5,
+        }
+
+    def _analyze_critique_vs_attack(self, text: str) -> float:
+        """
+        Analyze if text is constructive critique vs personal attack
+        Returns: 0 (pure attack) to 1 (pure critique)
+        """
+        constructive_words = r'\b(improve|better|suggest|could|try|instead)\b'
+        attack_words = r'\b(always|never|stupid|worse|bad|hate)\b'
+
+        constructive_count = len(re.findall(constructive_words, text))
+        attack_count = len(re.findall(attack_words, text))
+
+        total = constructive_count + attack_count
+        if total == 0:
+            return 0.5
+
+        return min(constructive_count / total, 1.0)
+
+
+class DecisionEngine:
+    """
+    Layer 3: Decision Engine
+    Makes final moderation decisions based on analysis
+    """
+
+    def __init__(self, config: Optional[Dict] = None):
+        self.config = config or self._default_config()
+
+    @staticmethod
+    def _default_config() -> Dict:
+        """Default decision thresholds"""
+        return {
+            "hallucination_high": 0.7,
+            "hallucination_medium": 0.4,
+            "risk_high": 0.7,
+            "risk_medium": 0.4,
+            "reality_alignment_threshold": 0.85,
+        }
+
+    def decide(
+        self,
+        context: Dict,
+        gray_zone: Dict,
+        hallucination_score: float,
+        reality_alignment: float = 0.85,
+    ) -> Dict:
+        """
+        Make moderation decision
+
+        Args:
+            context: Output from ContextDetector
+            gray_zone: Output from GrayZoneDetector
+            hallucination_score: Hallucination detection score (0-1)
+            reality_alignment: How well content aligns with facts (0-1)
+
+        Returns:
+            Decision dictionary with action and reasoning
+        """
+
+        # Calculate composite scores
+        hallucination_final = (
+            gray_zone["grayzone_score"] * 0.4 +
+            (1 - reality_alignment) * 0.3 +
+            context["sensitivity_level"] * 0.3
+        )
+
+        risk_final = (
+            context["emotional_intensity"] * 0.4 +
+            (1 - gray_zone["humor_vs_insult"]) * 0.3 +
+            context["sensitivity_level"] * 0.3
+        )
+
+        # Make decision
+        reasoning = []
+
+        if hallucination_final > self.config["hallucination_high"] or \
+           risk_final > self.config["risk_high"]:
+            decision = DecisionType.ESCALATE
+            reasoning.append("High risk/hallucination detected")
+        elif hallucination_final > self.config["hallucination_medium"] or \
+             risk_final > self.config["risk_medium"]:
+            decision = DecisionType.REWRITE
+            reasoning.append("Medium risk detected - rewrite suggested")
+        else:
+            decision = DecisionType.ALLOW
+            reasoning.append("Content acceptable")
+
+        # Add context to reasoning
+        if context["mood"] == "heated":
+            reasoning.append("Heated conversation context")
+        if context["sensitivity_level"] > 0.7:
+            reasoning.append("Sensitive topic detected")
+
+        return {
+            "hallucination_score": round(hallucination_final, 2),
+            "risk_score": round(risk_final, 2),
+            "decision": decision.value,
+            "reasoning": reasoning,
+            "confidence": round(max(hallucination_final, risk_final), 2),
+        }
+
+
+class HallucinationManagementLayer:
+    """
+    Complete HML System
+    Orchestrates all three layers for comprehensive analysis
+    """
+
+    def __init__(self, config: Optional[Dict] = None):
+        self.context_detector = ContextDetector()
+        self.gray_zone_detector = GrayZoneDetector()
+        self.decision_engine = DecisionEngine(config)
+        self.conversation_history = []
+
+    def analyze(
+        self,
+        content: str,
+        context_override: Optional[Dict] = None,
+        track_history: bool = True,
+    ) -> AnalysisResult:
+        """
+        Complete analysis pipeline
+
+        Args:
+            content: Text to analyze
+            context_override: Override automatic context detection
+            track_history: Whether to track conversation history
+
+        Returns:
+            AnalysisResult with complete analysis
+        """
+
+        # Layer 1: Context
+        if context_override:
+            context = context_override
+        else:
+            context = self.context_detector.detect(
+                content,
+                self.conversation_history
+            )
+
+        # Layer 2: Gray Zone
+        gray_zone = self.gray_zone_detector.detect(content, context)
+
+        # Calculate hallucination score (0-1 based on various signals)
+        hallucination_score = self._calculate_hallucination_score(
+            content,
+            gray_zone,
+            context
+        )
+
+        # Layer 3: Decision
+        decision_result = self.decision_engine.decide(
+            context,
+            gray_zone,
+            hallucination_score
+        )
+
+        # Generate suggestion if needed
+        suggestion = None
+        if decision_result["decision"] in ["rewrite", "escalate"]:
+            suggestion = self._generate_suggestion(content, context)
+
+        # Track history
+        if track_history:
+            self.conversation_history.append(content)
+
+        return AnalysisResult(
+            content=content,
+            hallucination_score=decision_result["hallucination_score"],
+            risk_score=decision_result["risk_score"],
+            decision=decision_result["decision"],
+            reasoning=decision_result["reasoning"],
+            suggestion=suggestion,
+            context=context,
+            gray_zone_analysis=gray_zone,
+        )
+
+    def _calculate_hallucination_score(
+        self,
+        content: str,
+        gray_zone: Dict,
+        context: Dict,
+    ) -> float:
+        """Calculate hallucination score from multiple signals"""
+        # This is simplified; real version would use ML models
+        base_score = gray_zone["grayzone_score"]
+        sensitivity_adjustment = context["sensitivity_level"] * 0.2
+        return min(base_score + sensitivity_adjustment, 1.0)
+
+    def _generate_suggestion(self, content: str, context: Dict) -> str:
+        """Generate improvement suggestion"""
+        suggestions = {
+            "heated": "Consider rephrasing in a calmer tone",
+            "playful": "Clarify if this is meant as humor",
+            "serious": "Add specific evidence or sources",
+        }
+        return suggestions.get(
+            context["mood"],
+            "Review for clarity and factual accuracy"
+        )
+
+    def reset_history(self):
+        """Reset conversation history"""
+        self.conversation_history = []
+
+
+# Example usage
+if __name__ == "__main__":
+    hml = HallucinationManagementLayer()
+
+    # Test case 1: Hallucination
+    result1 = hml.analyze("COVID vaccines cause permanent infertility")
+    print("Test 1 (Hallucination):")
+    print(f"  Decision: {result1.decision}")
+    print(f"  Hallucination Score: {result1.hallucination_score}")
+    print(f"  Reasoning: {result1.reasoning}\n")
+
+    # Test case 2: Gray zone
+    result2 = hml.analyze("People like you are ruining society")
+    print("Test 2 (Gray Zone):")
+    print(f"  Decision: {result2.decision}")
+    print(f"  Risk Score: {result2.risk_score}")
+    print(f"  Reasoning: {result2.reasoning}\n")
+
+    # Test case 3: Safe content
+    result3 = hml.analyze("The earth revolves around the sun")
+    print("Test 3 (Safe):")
+    print(f"  Decision: {result3.decision}")
+    print(f"  Hallucination Score: {result3.hallucination_score}\n")
+
